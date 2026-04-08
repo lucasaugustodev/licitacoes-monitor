@@ -79,6 +79,41 @@ async function initDB() {
       )
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS perfil_empresa (
+        id SERIAL PRIMARY KEY,
+        nome_empresa TEXT DEFAULT '',
+        cnpj TEXT DEFAULT '',
+        areas_atuacao TEXT[] DEFAULT '{}',
+        capacidades_tecnicas TEXT[] DEFAULT '{}',
+        certificacoes TEXT[] DEFAULT '{}',
+        atestados_descricao TEXT[] DEFAULT '{}',
+        porte TEXT DEFAULT '',
+        ufs_interesse TEXT[] DEFAULT '{}',
+        valor_min NUMERIC DEFAULT 0,
+        valor_max NUMERIC DEFAULT 0,
+        modalidades_interesse INT[] DEFAULT '{}',
+        descricao_livre TEXT DEFAULT '',
+        embedding vector(1536),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS chat_historico (
+        id SERIAL PRIMARY KEY,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        metadata JSONB DEFAULT '{}',
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    // Seed empty profile if none exists
+    await client.query(`
+      INSERT INTO perfil_empresa (id) VALUES (1) ON CONFLICT DO NOTHING
+    `);
+
     console.log("[db] PostgreSQL + pgvector schema initialized");
   } finally {
     client.release();
@@ -306,6 +341,73 @@ async function stats() {
   };
 }
 
+async function getPerfil() {
+  const { rows } = await pool.query("SELECT * FROM perfil_empresa WHERE id = 1");
+  return rows[0] || null;
+}
+
+async function updatePerfil(data) {
+  const { rows } = await pool.query(`
+    UPDATE perfil_empresa SET
+      nome_empresa = $1,
+      cnpj = $2,
+      areas_atuacao = $3,
+      capacidades_tecnicas = $4,
+      certificacoes = $5,
+      atestados_descricao = $6,
+      porte = $7,
+      ufs_interesse = $8,
+      valor_min = $9,
+      valor_max = $10,
+      modalidades_interesse = $11,
+      descricao_livre = $12,
+      updated_at = NOW()
+    WHERE id = 1
+    RETURNING *
+  `, [
+    data.nome_empresa || '',
+    data.cnpj || '',
+    data.areas_atuacao || [],
+    data.capacidades_tecnicas || [],
+    data.certificacoes || [],
+    data.atestados_descricao || [],
+    data.porte || '',
+    data.ufs_interesse || [],
+    data.valor_min || 0,
+    data.valor_max || 0,
+    data.modalidades_interesse || [],
+    data.descricao_livre || '',
+  ]);
+  return rows[0];
+}
+
+async function updatePerfilEmbedding(embedding) {
+  await pool.query(
+    "UPDATE perfil_empresa SET embedding = $1::vector WHERE id = 1",
+    [`[${embedding.join(",")}]`]
+  );
+}
+
+async function getChatHistorico(limite = 50) {
+  const { rows } = await pool.query(
+    "SELECT * FROM chat_historico ORDER BY id DESC LIMIT $1",
+    [limite]
+  );
+  return rows.reverse();
+}
+
+async function addChatMessage(role, content, metadata = {}) {
+  const { rows } = await pool.query(
+    "INSERT INTO chat_historico (role, content, metadata) VALUES ($1, $2, $3) RETURNING *",
+    [role, content, JSON.stringify(metadata)]
+  );
+  return rows[0];
+}
+
+async function clearChatHistorico() {
+  await pool.query("DELETE FROM chat_historico");
+}
+
 module.exports = {
   pool,
   initDB,
@@ -317,4 +419,10 @@ module.exports = {
   registrarSync,
   ultimoSync,
   stats,
+  getPerfil,
+  updatePerfil,
+  updatePerfilEmbedding,
+  getChatHistorico,
+  addChatMessage,
+  clearChatHistorico,
 };
