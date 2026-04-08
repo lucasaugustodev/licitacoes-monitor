@@ -1,164 +1,200 @@
-const Database = require("better-sqlite3");
-const path = require("path");
+const { Pool } = require("pg");
 
-const DB_PATH = path.join(__dirname, "..", "licitacoes.db");
-
-const db = new Database(DB_PATH);
-
-// Enable WAL mode for better concurrent read performance
-db.pragma("journal_mode = WAL");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS licitacoes (
-    id TEXT PRIMARY KEY,
-    orgao TEXT,
-    cnpj_orgao TEXT,
-    uf TEXT,
-    municipio TEXT,
-    objeto TEXT,
-    valor_estimado REAL,
-    valor_homologado REAL,
-    modalidade TEXT,
-    modalidade_id INTEGER,
-    modo_disputa TEXT,
-    situacao TEXT,
-    data_abertura TEXT,
-    data_encerramento TEXT,
-    data_publicacao TEXT,
-    srp INTEGER,
-    link_sistema TEXT,
-    amparo_legal TEXT,
-    ano_compra INTEGER,
-    sequencial_compra INTEGER,
-    keywords TEXT,
-    proposta_aberta INTEGER,
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_uf ON licitacoes(uf);
-  CREATE INDEX IF NOT EXISTS idx_modalidade ON licitacoes(modalidade_id);
-  CREATE INDEX IF NOT EXISTS idx_data_encerramento ON licitacoes(data_encerramento);
-  CREATE INDEX IF NOT EXISTS idx_data_publicacao ON licitacoes(data_publicacao);
-  CREATE INDEX IF NOT EXISTS idx_proposta_aberta ON licitacoes(proposta_aberta);
-  CREATE INDEX IF NOT EXISTS idx_valor ON licitacoes(valor_estimado);
-
-  CREATE TABLE IF NOT EXISTS sync_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    started_at TEXT DEFAULT (datetime('now')),
-    finished_at TEXT,
-    status TEXT,
-    total_encontrados INTEGER DEFAULT 0,
-    novos INTEGER DEFAULT 0,
-    atualizados INTEGER DEFAULT 0,
-    filtros TEXT
-  );
-`);
-
-const upsertStmt = db.prepare(`
-  INSERT INTO licitacoes (
-    id, orgao, cnpj_orgao, uf, municipio, objeto, valor_estimado, valor_homologado,
-    modalidade, modalidade_id, modo_disputa, situacao, data_abertura, data_encerramento,
-    data_publicacao, srp, link_sistema, amparo_legal, ano_compra, sequencial_compra,
-    keywords, proposta_aberta, updated_at
-  ) VALUES (
-    @id, @orgao, @cnpj_orgao, @uf, @municipio, @objeto, @valor_estimado, @valor_homologado,
-    @modalidade, @modalidade_id, @modo_disputa, @situacao, @data_abertura, @data_encerramento,
-    @data_publicacao, @srp, @link_sistema, @amparo_legal, @ano_compra, @sequencial_compra,
-    @keywords, @proposta_aberta, datetime('now')
-  ) ON CONFLICT(id) DO UPDATE SET
-    situacao = excluded.situacao,
-    valor_homologado = excluded.valor_homologado,
-    proposta_aberta = excluded.proposta_aberta,
-    updated_at = datetime('now')
-`);
-
-const upsertMany = db.transaction((items) => {
-  let novos = 0;
-  let atualizados = 0;
-  for (const item of items) {
-    const existing = db.prepare("SELECT id FROM licitacoes WHERE id = ?").get(item.id);
-    upsertStmt.run({
-      id: item.id,
-      orgao: item.orgao,
-      cnpj_orgao: item.cnpjOrgao,
-      uf: item.uf,
-      municipio: item.municipio,
-      objeto: item.objeto,
-      valor_estimado: item.valorEstimado,
-      valor_homologado: item.valorHomologado,
-      modalidade: item.modalidade,
-      modalidade_id: item.modalidadeId || null,
-      modo_disputa: item.modoDisputa,
-      situacao: item.situacao,
-      data_abertura: item.dataAbertura,
-      data_encerramento: item.dataEncerramento,
-      data_publicacao: item.dataPublicacao,
-      srp: item.srp ? 1 : 0,
-      link_sistema: item.linkSistema,
-      amparo_legal: item.amparoLegal,
-      ano_compra: item.anoCompra,
-      sequencial_compra: item.sequencialCompra,
-      keywords: JSON.stringify(item.keywordsEncontradas || []),
-      proposta_aberta: item.propostaAberta ? 1 : 0,
-    });
-    if (existing) atualizados++;
-    else novos++;
-  }
-  return { novos, atualizados };
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL || "postgresql://licitacoes:lic2024secure@localhost:5432/licitacoes_db",
 });
 
-function buscar({ uf, modalidade, texto, valorMin, valorMax, apenasAbertas = true, ordenacao = "encerramento", limite = 200 } = {}) {
-  let where = ["1=1"];
-  const params = {};
+// Initialize schema
+async function initDB() {
+  const client = await pool.connect();
+  try {
+    await client.query("CREATE EXTENSION IF NOT EXISTS vector");
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS licitacoes (
+        id TEXT PRIMARY KEY,
+        orgao TEXT,
+        cnpj_orgao TEXT,
+        uf TEXT,
+        municipio TEXT,
+        objeto TEXT,
+        valor_estimado DOUBLE PRECISION,
+        valor_homologado DOUBLE PRECISION,
+        modalidade TEXT,
+        modalidade_id INTEGER,
+        modo_disputa TEXT,
+        situacao TEXT,
+        data_abertura TEXT,
+        data_encerramento TEXT,
+        data_publicacao TEXT,
+        srp BOOLEAN DEFAULT FALSE,
+        link_sistema TEXT,
+        amparo_legal TEXT,
+        ano_compra INTEGER,
+        sequencial_compra INTEGER,
+        keywords TEXT,
+        proposta_aberta BOOLEAN DEFAULT FALSE,
+        embedding vector(1536),
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+
+    // Indexes
+    await client.query("CREATE INDEX IF NOT EXISTS idx_uf ON licitacoes(uf)");
+    await client.query("CREATE INDEX IF NOT EXISTS idx_modalidade ON licitacoes(modalidade_id)");
+    await client.query("CREATE INDEX IF NOT EXISTS idx_data_encerramento ON licitacoes(data_encerramento)");
+    await client.query("CREATE INDEX IF NOT EXISTS idx_data_publicacao ON licitacoes(data_publicacao)");
+    await client.query("CREATE INDEX IF NOT EXISTS idx_proposta_aberta ON licitacoes(proposta_aberta)");
+    await client.query("CREATE INDEX IF NOT EXISTS idx_valor ON licitacoes(valor_estimado)");
+    // Vector similarity index (IVFFlat for performance)
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_embedding ON licitacoes
+      USING ivfflat (embedding vector_cosine_ops) WITH (lists = 50)
+    `).catch(() => {
+      // IVFFlat needs rows to build, will create after data exists
+      console.log("[db] IVFFlat index deferred (needs data first), using HNSW instead");
+      return client.query(`
+        CREATE INDEX IF NOT EXISTS idx_embedding_hnsw ON licitacoes
+        USING hnsw (embedding vector_cosine_ops)
+      `).catch(() => console.log("[db] HNSW index also deferred"));
+    });
+
+    // Full-text search index
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_objeto_fts ON licitacoes
+      USING gin(to_tsvector('portuguese', COALESCE(objeto, '')))
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS sync_log (
+        id SERIAL PRIMARY KEY,
+        started_at TIMESTAMPTZ DEFAULT NOW(),
+        finished_at TIMESTAMPTZ,
+        status TEXT,
+        total_encontrados INTEGER DEFAULT 0,
+        novos INTEGER DEFAULT 0,
+        atualizados INTEGER DEFAULT 0,
+        filtros TEXT
+      )
+    `);
+
+    console.log("[db] PostgreSQL + pgvector schema initialized");
+  } finally {
+    client.release();
+  }
+}
+
+async function upsertMany(items) {
+  const client = await pool.connect();
+  let novos = 0;
+  let atualizados = 0;
+
+  try {
+    await client.query("BEGIN");
+
+    for (const item of items) {
+      const existing = await client.query("SELECT id FROM licitacoes WHERE id = $1", [item.id]);
+
+      await client.query(`
+        INSERT INTO licitacoes (
+          id, orgao, cnpj_orgao, uf, municipio, objeto, valor_estimado, valor_homologado,
+          modalidade, modalidade_id, modo_disputa, situacao, data_abertura, data_encerramento,
+          data_publicacao, srp, link_sistema, amparo_legal, ano_compra, sequencial_compra,
+          keywords, proposta_aberta, updated_at
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, NOW()
+        ) ON CONFLICT(id) DO UPDATE SET
+          situacao = EXCLUDED.situacao,
+          valor_homologado = EXCLUDED.valor_homologado,
+          proposta_aberta = EXCLUDED.proposta_aberta,
+          updated_at = NOW()
+      `, [
+        item.id, item.orgao, item.cnpjOrgao, item.uf, item.municipio,
+        item.objeto, item.valorEstimado, item.valorHomologado,
+        item.modalidade, item.modalidadeId || null, item.modoDisputa,
+        item.situacao, item.dataAbertura, item.dataEncerramento,
+        item.dataPublicacao, item.srp ? true : false, item.linkSistema,
+        item.amparoLegal, item.anoCompra, item.sequencialCompra,
+        JSON.stringify(item.keywordsEncontradas || []),
+        item.propostaAberta ? true : false,
+      ]);
+
+      if (existing.rows.length > 0) atualizados++;
+      else novos++;
+    }
+
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  return { novos, atualizados };
+}
+
+async function buscar({ uf, modalidade, texto, valorMin, valorMax, apenasAbertas = true, ordenacao = "encerramento", limite = 200 } = {}) {
+  const where = ["1=1"];
+  const params = [];
+  let paramIdx = 1;
 
   if (apenasAbertas) {
-    where.push("proposta_aberta = 1");
-    where.push("(data_encerramento IS NULL OR data_encerramento > datetime('now'))");
+    where.push("proposta_aberta = true");
+    where.push("(data_encerramento IS NULL OR data_encerramento > NOW()::text)");
   }
 
   if (uf) {
-    where.push("uf = @uf");
-    params.uf = uf;
+    where.push(`uf = $${paramIdx++}`);
+    params.push(uf);
   }
 
   if (modalidade) {
-    where.push("modalidade_id = @modalidade");
-    params.modalidade = Number(modalidade);
+    where.push(`modalidade_id = $${paramIdx++}`);
+    params.push(Number(modalidade));
   }
 
   if (texto) {
-    where.push("(objeto LIKE @texto OR orgao LIKE @texto OR municipio LIKE @texto)");
-    params.texto = `%${texto}%`;
+    // Use full-text search for better Portuguese matching
+    where.push(`(
+      to_tsvector('portuguese', COALESCE(objeto, '')) @@ plainto_tsquery('portuguese', $${paramIdx})
+      OR objeto ILIKE $${paramIdx + 1}
+      OR orgao ILIKE $${paramIdx + 1}
+      OR municipio ILIKE $${paramIdx + 1}
+    )`);
+    params.push(texto);
+    params.push(`%${texto}%`);
+    paramIdx += 2;
   }
 
   if (valorMin) {
-    where.push("valor_estimado >= @valorMin");
-    params.valorMin = Number(valorMin);
+    where.push(`valor_estimado >= $${paramIdx++}`);
+    params.push(Number(valorMin));
   }
 
   if (valorMax) {
-    where.push("valor_estimado <= @valorMax");
-    params.valorMax = Number(valorMax);
+    where.push(`valor_estimado <= $${paramIdx++}`);
+    params.push(Number(valorMax));
   }
 
   const orderMap = {
-    encerramento: "data_encerramento ASC",
+    encerramento: "data_encerramento ASC NULLS LAST",
     publicacao: "data_publicacao DESC",
-    "valor-desc": "valor_estimado DESC",
-    "valor-asc": "valor_estimado ASC",
+    "valor-desc": "valor_estimado DESC NULLS LAST",
+    "valor-asc": "valor_estimado ASC NULLS LAST",
   };
-  const order = orderMap[ordenacao] || "data_encerramento ASC";
+  const order = orderMap[ordenacao] || "data_encerramento ASC NULLS LAST";
 
+  params.push(limite);
   const sql = `
     SELECT * FROM licitacoes
     WHERE ${where.join(" AND ")}
     ORDER BY ${order}
-    LIMIT @limite
+    LIMIT $${paramIdx}
   `;
-  params.limite = limite;
 
-  const rows = db.prepare(sql).all(params);
+  const { rows } = await pool.query(sql, params);
 
   return rows.map((r) => ({
     id: r.id,
@@ -185,22 +221,100 @@ function buscar({ uf, modalidade, texto, valorMin, valorMax, apenasAbertas = tru
   }));
 }
 
-function registrarSync(status, total, novos, atualizados, filtros) {
-  db.prepare(`
+// Semantic search using vector embeddings
+async function buscarSemantico(queryEmbedding, { limite = 20, uf, apenasAbertas = true } = {}) {
+  const where = ["embedding IS NOT NULL"];
+  const params = [`[${queryEmbedding.join(",")}]`];
+  let paramIdx = 2;
+
+  if (apenasAbertas) {
+    where.push("proposta_aberta = true");
+    where.push("(data_encerramento IS NULL OR data_encerramento > NOW()::text)");
+  }
+
+  if (uf) {
+    where.push(`uf = $${paramIdx++}`);
+    params.push(uf);
+  }
+
+  params.push(limite);
+  const sql = `
+    SELECT *, 1 - (embedding <=> $1::vector) as similarity
+    FROM licitacoes
+    WHERE ${where.join(" AND ")}
+    ORDER BY embedding <=> $1::vector
+    LIMIT $${paramIdx}
+  `;
+
+  const { rows } = await pool.query(sql, params);
+  return rows.map((r) => ({
+    id: r.id,
+    orgao: r.orgao,
+    uf: r.uf,
+    municipio: r.municipio,
+    objeto: r.objeto,
+    valorEstimado: r.valor_estimado,
+    modalidade: r.modalidade,
+    situacao: r.situacao,
+    dataEncerramento: r.data_encerramento,
+    propostaAberta: !!r.proposta_aberta,
+    similarity: r.similarity,
+  }));
+}
+
+// Update embedding for a licitação
+async function updateEmbedding(id, embedding) {
+  await pool.query(
+    "UPDATE licitacoes SET embedding = $1::vector WHERE id = $2",
+    [`[${embedding.join(",")}]`, id]
+  );
+}
+
+// Get licitações without embeddings (for batch processing)
+async function getLicitacoesSemEmbedding(limite = 100) {
+  const { rows } = await pool.query(
+    "SELECT id, objeto, orgao, municipio, uf FROM licitacoes WHERE embedding IS NULL LIMIT $1",
+    [limite]
+  );
+  return rows;
+}
+
+async function registrarSync(status, total, novos, atualizados, filtros) {
+  await pool.query(`
     INSERT INTO sync_log (finished_at, status, total_encontrados, novos, atualizados, filtros)
-    VALUES (datetime('now'), @status, @total, @novos, @atualizados, @filtros)
-  `).run({ status, total, novos, atualizados, filtros: JSON.stringify(filtros) });
+    VALUES (NOW(), $1, $2, $3, $4, $5)
+  `, [status, total, novos, atualizados, JSON.stringify(filtros)]);
 }
 
-function ultimoSync() {
-  return db.prepare("SELECT * FROM sync_log ORDER BY id DESC LIMIT 1").get() || null;
+async function ultimoSync() {
+  const { rows } = await pool.query("SELECT * FROM sync_log ORDER BY id DESC LIMIT 1");
+  return rows[0] || null;
 }
 
-function stats() {
-  const total = db.prepare("SELECT COUNT(*) as n FROM licitacoes").get().n;
-  const abertas = db.prepare("SELECT COUNT(*) as n FROM licitacoes WHERE proposta_aberta = 1 AND (data_encerramento IS NULL OR data_encerramento > datetime('now'))").get().n;
-  const ultimo = ultimoSync();
-  return { total, abertas, ultimoSync: ultimo };
+async function stats() {
+  const totalRes = await pool.query("SELECT COUNT(*) as n FROM licitacoes");
+  const abertasRes = await pool.query(
+    "SELECT COUNT(*) as n FROM licitacoes WHERE proposta_aberta = true AND (data_encerramento IS NULL OR data_encerramento > NOW()::text)"
+  );
+  const embeddingsRes = await pool.query("SELECT COUNT(*) as n FROM licitacoes WHERE embedding IS NOT NULL");
+  const ultimo = await ultimoSync();
+  return {
+    total: parseInt(totalRes.rows[0].n),
+    abertas: parseInt(abertasRes.rows[0].n),
+    comEmbedding: parseInt(embeddingsRes.rows[0].n),
+    ultimoSync: ultimo,
+  };
 }
 
-module.exports = { upsertMany, buscar, registrarSync, ultimoSync, stats, db };
+module.exports = {
+  pool,
+  initDB,
+  upsertMany,
+  buscar,
+  buscarSemantico,
+  updateEmbedding,
+  getLicitacoesSemEmbedding,
+  registrarSync,
+  ultimoSync,
+  stats,
+};

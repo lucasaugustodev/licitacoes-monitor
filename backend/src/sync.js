@@ -1,22 +1,16 @@
 const { buscarCompleto, buscarLicitacoes, UFS, MODALIDADES_TI } = require("./pncp");
 const { upsertMany, registrarSync, stats } = require("./db");
 
-// Track sync state for status endpoint
 let syncState = {
   running: false,
   progress: null,
   lastResult: null,
 };
 
-function getSyncState() {
-  return { ...syncState, dbStats: stats() };
+async function getSyncState() {
+  return { ...syncState, dbStats: await stats() };
 }
 
-/**
- * Sync completo: varre todas as UFs e modalidades relevantes.
- * Roda em background, salva no banco a cada bloco.
- * 60 dias, 27 UFs x 5 modalidades = 135 jobs, 3 em paralelo.
- */
 async function sincronizarCompleto({ diasPassados = 60, concorrencia = 3 } = {}) {
   if (syncState.running) {
     return { status: "ja_rodando", progress: syncState.progress };
@@ -39,9 +33,8 @@ async function sincronizarCompleto({ diasPassados = 60, concorrencia = 3 } = {})
           console.log(`[sync] ${p.completedJobs}/${p.totalJobs} jobs | ${p.uf} mod=${p.modalidade} +${p.found}`);
         }
       },
-      onBlocoCompleto: (items, info) => {
-        // Save to DB immediately after each UF+modalidade block
-        const { novos, atualizados } = upsertMany(items);
+      onBlocoCompleto: async (items, info) => {
+        const { novos, atualizados } = await upsertMany(items);
         syncState.progress.totalEncontrados += items.length;
         syncState.progress.novos += novos;
         syncState.progress.atualizados += atualizados;
@@ -57,7 +50,7 @@ async function sincronizarCompleto({ diasPassados = 60, concorrencia = 3 } = {})
       jobsExecutados: resultado.jobsExecutados,
     };
 
-    registrarSync("ok", resultado.total, syncState.progress.novos, syncState.progress.atualizados, { diasPassados, concorrencia });
+    await registrarSync("ok", resultado.total, syncState.progress.novos, syncState.progress.atualizados, { diasPassados, concorrencia });
     syncState.lastResult = result;
     console.log(`[sync] Completo! ${resultado.total} encontrados, ${syncState.progress.novos} novos`);
 
@@ -65,7 +58,7 @@ async function sincronizarCompleto({ diasPassados = 60, concorrencia = 3 } = {})
   } catch (err) {
     console.error("[sync] Erro:", err.message);
     const result = { status: "erro", erro: err.message };
-    registrarSync("erro", 0, 0, 0, { erro: err.message });
+    await registrarSync("erro", 0, 0, 0, { erro: err.message });
     syncState.lastResult = result;
     return result;
   } finally {
@@ -73,9 +66,6 @@ async function sincronizarCompleto({ diasPassados = 60, concorrencia = 3 } = {})
   }
 }
 
-/**
- * Sync rapido: busca uma UF ou modalidade especifica.
- */
 async function sincronizarRapido({ diasPassados = 60, uf, modalidade } = {}) {
   if (syncState.running) {
     return { status: "ja_rodando", progress: syncState.progress };
@@ -98,19 +88,19 @@ async function sincronizarRapido({ diasPassados = 60, uf, modalidade } = {}) {
 
     let novos = 0, atualizados = 0;
     if (resultado.resultados.length > 0) {
-      const r = upsertMany(resultado.resultados);
+      const r = await upsertMany(resultado.resultados);
       novos = r.novos;
       atualizados = r.atualizados;
     }
 
     const result = { status: "ok", total: resultado.total, novos, atualizados };
-    registrarSync("ok", resultado.total, novos, atualizados, filtros);
+    await registrarSync("ok", resultado.total, novos, atualizados, filtros);
     syncState.lastResult = result;
     console.log(`[sync-rapido] ${resultado.total} encontrados, ${novos} novos`);
     return result;
   } catch (err) {
     console.error("[sync-rapido] Erro:", err.message);
-    registrarSync("erro", 0, 0, 0, { ...filtros, erro: err.message });
+    await registrarSync("erro", 0, 0, 0, { ...filtros, erro: err.message });
     return { status: "erro", erro: err.message };
   } finally {
     syncState.running = false;
