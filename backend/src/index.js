@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
-const { initDB, buscar, buscarSemantico, stats } = require("./db");
+const http = require("http");
+const { initDB, buscar, buscarSemantico, stats, getPerfil, updatePerfil, getChatHistorico, addChatMessage, clearChatHistorico } = require("./db");
 const { sincronizarCompleto, sincronizarRapido, getSyncState } = require("./sync");
 const { KEYWORDS } = require("./pncp");
 
@@ -111,6 +112,95 @@ app.get("/api/modalidades", (_req, res) => {
   });
 });
 
+// Perfil da empresa
+app.get("/api/perfil", async (_req, res) => {
+  try {
+    const perfil = await getPerfil();
+    res.json(perfil);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put("/api/perfil", async (req, res) => {
+  try {
+    const perfil = await updatePerfil(req.body);
+    res.json(perfil);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Chat proxy to Python AI service
+app.post("/api/chat", async (req, res) => {
+  try {
+    // Save user message
+    await addChatMessage("user", req.body.message, {
+      licitacoesVisiveis: req.body.licitacoesVisiveis?.map(l => l.id) || [],
+      filtrosAtivos: req.body.filtrosAtivos || {},
+    });
+
+    // Proxy to Python service
+    const payload = JSON.stringify(req.body);
+    const options = {
+      hostname: "127.0.0.1",
+      port: 5001,
+      path: "/chat",
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+      timeout: 120000,
+    };
+
+    const proxyReq = http.request(options, (proxyRes) => {
+      let data = "";
+      proxyRes.on("data", (chunk) => { data += chunk; });
+      proxyRes.on("end", async () => {
+        try {
+          const parsed = JSON.parse(data);
+          await addChatMessage("assistant", parsed.content, parsed.acoes || {});
+          res.json(parsed);
+        } catch (e) {
+          res.status(502).json({ error: "Invalid response from AI service", raw: data.substring(0, 500) });
+        }
+      });
+    });
+
+    proxyReq.on("error", (err) => {
+      res.status(502).json({ error: "AI service unavailable: " + err.message });
+    });
+
+    proxyReq.on("timeout", () => {
+      proxyReq.destroy();
+      res.status(504).json({ error: "AI service timeout" });
+    });
+
+    proxyReq.write(payload);
+    proxyReq.end();
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Chat history
+app.get("/api/chat/historico", async (req, res) => {
+  try {
+    const limite = parseInt(req.query.limite) || 50;
+    const historico = await getChatHistorico(limite);
+    res.json({ historico });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/chat/historico", async (_req, res) => {
+  try {
+    await clearChatHistorico();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Init DB then start server
 initDB().then(() => {
   app.listen(PORT, () => {
@@ -121,6 +211,11 @@ initDB().then(() => {
     console.log(`  POST /api/sync/rapido           (sync uma UF/modalidade)`);
     console.log(`  GET  /api/sync/status           (progresso do sync)`);
     console.log(`  GET  /api/stats`);
+    console.log(`  GET  /api/perfil`);
+    console.log(`  PUT  /api/perfil`);
+    console.log(`  POST /api/chat`);
+    console.log(`  GET  /api/chat/historico`);
+    console.log(`  DELETE /api/chat/historico`);
   });
 }).catch((err) => {
   console.error("[init] Failed to initialize DB:", err);
