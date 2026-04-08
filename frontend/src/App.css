@@ -28,9 +28,47 @@ body {
 }
 
 .app {
-  max-width: 1200px;
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  grid-template-rows: auto auto 1fr;
+  gap: 0 1.5rem;
+  max-width: 1600px;
   margin: 0 auto;
   padding: 2rem 1.5rem;
+  min-height: 100vh;
+}
+
+.app > header {
+  grid-column: 1 / -1;
+}
+
+.app > .sync-bar {
+  grid-column: 1 / -1;
+}
+
+.main-content {
+  grid-column: 1;
+  grid-row: 3;
+  min-width: 0;
+}
+
+.chat-column {
+  grid-column: 2;
+  grid-row: 3;
+}
+
+@media (max-width: 900px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+  .chat-column {
+    grid-column: 1;
+    grid-row: 4;
+  }
+  .chat-panel {
+    height: 400px;
+    position: static;
+  }
 }
 
 header {
@@ -415,4 +453,9 @@ header h1 {
   .filter-row {
     grid-template-columns: 1fr;
   }
+}
+
+.card-highlighted {
+  border-color: var(--primary) !important;
+  box-shadow: 0 0 0 2px var(--primary), 0 4px 12px rgba(99, 102, 241, 0.3);
 }

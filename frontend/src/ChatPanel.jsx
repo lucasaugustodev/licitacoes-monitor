@@ -1,11 +1,11 @@
-import { useState, useEffect, useRef, useCallback } from react;
-import ./ChatPanel.css;
+import { useState, useEffect, useRef, useCallback } from "react";
+import "./ChatPanel.css";
 
-const API_URL = /api;
+const API_URL = "/api";
 
 export default function ChatPanel({ licitacoesVisiveis, filtrosAtivos, onAcoes }) {
   const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState();
+  const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);

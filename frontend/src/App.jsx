@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import "./App.css";
+import ChatPanel from "./ChatPanel";
+import PerfilModal from "./PerfilModal";
 
-const API_URL = "http://localhost:3002/api";
+const API_URL = "/api";
 
 function formatCurrency(value) {
   if (!value && value !== 0) return "—";
@@ -29,13 +31,13 @@ function BadgeUrgencia({ dataEncerramento }) {
   return <span className="badge badge-ok">{dias} dias</span>;
 }
 
-function LicitacaoCard({ item }) {
+function LicitacaoCard({ item, highlighted }) {
   const linkPncp = item.cnpjOrgao && item.anoCompra && item.sequencialCompra
     ? `https://pncp.gov.br/app/editais/${item.cnpjOrgao}/${item.anoCompra}/${item.sequencialCompra}`
     : null;
 
   return (
-    <div className="card">
+    <div className={`card ${highlighted ? "card-highlighted" : ""}`}>
       <div className="card-header">
         <div className="card-title-row">
           <h3>{item.orgao || "Orgao nao informado"}</h3>
@@ -168,6 +170,9 @@ export default function App() {
   const [ufs, setUfs] = useState([]);
   const [modalidades, setModalidades] = useState([]);
 
+  const [perfilOpen, setPerfilOpen] = useState(false);
+  const [highlightedIds, setHighlightedIds] = useState([]);
+
   const pollRef = useRef(null);
 
   const fetchStats = useCallback(() => {
@@ -256,6 +261,22 @@ export default function App() {
     buscar();
   }
 
+  function handleAcoes(acoes) {
+    if (acoes.filtrar) {
+      if (acoes.filtrar.uf) setUf(acoes.filtrar.uf);
+      if (acoes.filtrar.texto) setTexto(acoes.filtrar.texto);
+      if (acoes.filtrar.modalidade) setModalidade(String(acoes.filtrar.modalidade));
+      setTimeout(() => buscar(), 100);
+    }
+    if (acoes.destacar) {
+      setHighlightedIds(acoes.destacar);
+      setTimeout(() => setHighlightedIds([]), 10000);
+    }
+    if (acoes.abrir_edital) {
+      window.open(acoes.abrir_edital, "_blank");
+    }
+  }
+
   return (
     <div className="app">
       <header>
@@ -270,97 +291,118 @@ export default function App() {
         onRefresh={atualizar}
       />
 
-      <div className="filters">
-        <div className="filter-row">
-          <div className="filter-group">
-            <label>UF</label>
-            <select value={uf} onChange={(e) => setUf(e.target.value)}>
-              <option value="">Todas</option>
-              {ufs.map((u) => (
-                <option key={u} value={u}>{u}</option>
-              ))}
-            </select>
+      <div className="main-content">
+        <div className="filters">
+          <div className="filter-row">
+            <div className="filter-group">
+              <label>UF</label>
+              <select value={uf} onChange={(e) => setUf(e.target.value)}>
+                <option value="">Todas</option>
+                {ufs.map((u) => (
+                  <option key={u} value={u}>{u}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="filter-group">
+              <label>Modalidade</label>
+              <select value={modalidade} onChange={(e) => setModalidade(e.target.value)}>
+                <option value="">Todas</option>
+                {modalidades.map((m) => (
+                  <option key={m.codigo} value={m.codigo}>{m.nome}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="filter-group">
+              <label>Buscar no texto</label>
+              <input
+                type="text"
+                placeholder="software, sistema, TI..."
+                value={texto}
+                onChange={(e) => setTexto(e.target.value)}
+              />
+            </div>
+
+            <div className="filter-group">
+              <label>Valor min (R$)</label>
+              <input
+                type="number"
+                placeholder="0"
+                value={valorMin}
+                onChange={(e) => setValorMin(e.target.value)}
+              />
+            </div>
+
+            <div className="filter-group">
+              <label>Valor max (R$)</label>
+              <input
+                type="number"
+                placeholder="Sem limite"
+                value={valorMax}
+                onChange={(e) => setValorMax(e.target.value)}
+              />
+            </div>
+
+            <div className="filter-group">
+              <label>Ordenar por</label>
+              <select value={ordenacao} onChange={(e) => setOrdenacao(e.target.value)}>
+                <option value="encerramento">Encerramento (mais proximo)</option>
+                <option value="publicacao">Publicacao (mais recente)</option>
+                <option value="valor-desc">Maior valor</option>
+                <option value="valor-asc">Menor valor</option>
+              </select>
+            </div>
           </div>
 
-          <div className="filter-group">
-            <label>Modalidade</label>
-            <select value={modalidade} onChange={(e) => setModalidade(e.target.value)}>
-              <option value="">Todas</option>
-              {modalidades.map((m) => (
-                <option key={m.codigo} value={m.codigo}>{m.nome}</option>
-              ))}
-            </select>
-          </div>
-
-          <div className="filter-group">
-            <label>Buscar no texto</label>
-            <input
-              type="text"
-              placeholder="software, sistema, TI..."
-              value={texto}
-              onChange={(e) => setTexto(e.target.value)}
-            />
-          </div>
-
-          <div className="filter-group">
-            <label>Valor min (R$)</label>
-            <input
-              type="number"
-              placeholder="0"
-              value={valorMin}
-              onChange={(e) => setValorMin(e.target.value)}
-            />
-          </div>
-
-          <div className="filter-group">
-            <label>Valor max (R$)</label>
-            <input
-              type="number"
-              placeholder="Sem limite"
-              value={valorMax}
-              onChange={(e) => setValorMax(e.target.value)}
-            />
-          </div>
-
-          <div className="filter-group">
-            <label>Ordenar por</label>
-            <select value={ordenacao} onChange={(e) => setOrdenacao(e.target.value)}>
-              <option value="encerramento">Encerramento (mais proximo)</option>
-              <option value="publicacao">Publicacao (mais recente)</option>
-              <option value="valor-desc">Maior valor</option>
-              <option value="valor-asc">Menor valor</option>
-            </select>
-          </div>
+          <button className="btn btn-buscar" onClick={buscar} disabled={loading}>
+            {loading ? "Buscando..." : "Filtrar"}
+          </button>
         </div>
 
-        <button className="btn btn-buscar" onClick={buscar} disabled={loading}>
-          {loading ? "Buscando..." : "Filtrar"}
+        {error && <div className="error">Erro: {error}</div>}
+
+        <div className="results-header">
+          <span>{total} resultado{total !== 1 ? "s" : ""}</span>
+        </div>
+
+        <div className="results">
+          {licitacoes.map((item, i) => (
+            <LicitacaoCard
+              key={item.id || i}
+              item={item}
+              highlighted={highlightedIds.includes(item.id)}
+            />
+          ))}
+          {!loading && licitacoes.length === 0 && !error && (
+            <div className="empty">
+              {dbStats.total === 0
+                ? 'Clique em "Sync Completo" para buscar dados do PNCP'
+                : "Nenhuma licitacao corresponde aos filtros"}
+            </div>
+          )}
+          {syncStatus.running && (
+            <div className="empty">Sincronizando com PNCP... voce pode filtrar enquanto os dados chegam.</div>
+          )}
+        </div>
+      </div>
+
+      <div className="chat-column">
+        <ChatPanel
+          licitacoesVisiveis={licitacoes}
+          filtrosAtivos={{ uf, modalidade, texto, valorMin, valorMax, ordenacao }}
+          onAcoes={handleAcoes}
+        />
+        <button
+          className="btn btn-perfil"
+          onClick={() => setPerfilOpen(true)}
+          style={{ marginTop: "0.5rem", width: "100%", background: "var(--surface)", border: "1px solid var(--border)", color: "var(--text)", padding: "0.5rem", borderRadius: "8px", cursor: "pointer", fontSize: "0.8rem" }}
+        >
+          Meu Perfil da Empresa
         </button>
       </div>
 
-      {error && <div className="error">Erro: {error}</div>}
-
-      <div className="results-header">
-        <span>
-          {total} resultado{total !== 1 ? "s" : ""}
-        </span>
-      </div>
-
-      <div className="results">
-        {licitacoes.map((item, i) => (
-          <LicitacaoCard key={item.id || i} item={item} />
-        ))}
-        {!loading && licitacoes.length === 0 && !error && (
-          <div className="empty">
-            {dbStats.total === 0
-              ? 'Clique em "Sync Completo" para buscar dados do PNCP'
-              : "Nenhuma licitacao corresponde aos filtros"}
-          </div>
-        )}
-        {syncStatus.running && (
-          <div className="empty">Sincronizando com PNCP... voce pode filtrar enquanto os dados chegam.</div>
-        )}
-      </div>
+      <PerfilModal open={perfilOpen} onClose={() => setPerfilOpen(false)} />
     </div>
   );
 }
